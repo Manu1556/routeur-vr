@@ -835,24 +835,43 @@ function eventos(pasos, velas) {
   }
   return filas;
 }
-function cambios(filas) {
-  const lista = []; let ant = null;
-  for (const p of filas) if (!ant || Math.abs(p.twa - ant.twa) >= 10 || p.vela !== ant.vela || p.evento) { lista.push(p); ant = p; }
-  return lista;
+/* Órdenes para programar en el juego: en cada tramo se elige lo que mejor sigue la ruta,
+   un TWA fijo (el barco sigue al viento) o un CAP fijo (rumbo de brújula, útil cuando el viento rola
+   pero la ruta óptima sigue recta: hacia una marca, a lo largo de una costa, en una zona de transición). */
+const difAng = (a, b) => Math.abs(((a - b) % 360 + 540) % 360 - 180);
+function mediaCap(caps) {
+  const x = caps.reduce((s, c) => s + Math.cos(c * Math.PI / 180), 0), y = caps.reduce((s, c) => s + Math.sin(c * Math.PI / 180), 0);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
+function ordenes(filas, tol = 8) {
+  const res = [], n = filas.length;
+  let i = 0;
+  while (i < n) {
+    const p = filas[i], lado = Math.sign(p.twa), sigue = q => !q.evento && Math.sign(q.twa) === lado && q.vela === p.vela;
+    let jt = i; while (jt + 1 < n && sigue(filas[jt + 1]) && Math.abs(filas[jt + 1].twa - p.twa) < tol) jt++;
+    let jc = i; while (jc + 1 < n && sigue(filas[jc + 1]) && difAng(filas[jc + 1].cap, p.cap) < tol && Math.abs(filas[jc + 1].twa) >= 40) jc++;
+    const cap = jc > jt + 1 && Math.abs(p.twa) >= 40, j = cap ? jc : jt, tramo = filas.slice(i, j + 1);
+    res.push({ ...p, modo: cap ? "CAP" : "TWA",
+      valor: cap ? Math.round(mediaCap(tramo.map(q => q.cap))) % 360 : Math.round(tramo.reduce((s, q) => s + q.twa, 0) / tramo.length) });
+    i = j + 1;
+  }
+  // une órdenes seguidas casi iguales (el router oscila unos grados de una hora a otra)
+  return res.filter((p, k) => k === 0 || p.evento || p.modo !== res[k - 1].modo ||
+    (p.modo === "CAP" ? difAng(p.valor, res[k - 1].valor) : Math.abs(p.valor - res[k - 1].valor)) >= 4);
+}
+const fOrden = p => p.modo === "CAP" ? `CAP ${String(p.valor).padStart(3, "0")}°` : `TWA ${fTwa(p.valor ?? p.twa)}`;
+function cambios(filas) { return ordenes(filas); }
 const COLOR_VELA = { "Jib": "#E3912B", "Spi": "#1A9B72", "Code 0": "#6FA0DC", "Spi lourd": "#E08A98", "Trinquette": "#5FA86E", "Spi léger": "#D9907A", "Génois léger": "#C77FB4" };
 const fTwa = a => `${a > 0 ? "+" : "−"}${Math.abs(Math.round(a))}°`;
 const fDesde = h => { const m = Math.max(0, Math.round(h * 60)); return `+${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}`; };
 function momentosClave(r, filas) {
-  const dentro = filas.filter(p => p.t >= r.t0 - 1e-6 && p.t <= r.t0 + 8 + 1e-6);
-  if (!dentro.length) return [];
-  const sel = [{ ...dentro[0], ahora: true }];
-  let ref = dentro[0];
-  for (const p of dentro.slice(1)) {
-    if (p.evento || Math.abs(p.twa - ref.twa) >= 5) { sel.push({ ...p, peso: p.evento ? 1e6 : Math.abs(p.twa - ref.twa) }); ref = p; }
-  }
-  if (sel.length > 10) return [sel[0], ...sel.slice(1).sort((a, b) => b.peso - a.peso).slice(0, 9).sort((a, b) => a.t - b.t)];
-  return sel;
+  const ord = ordenes(filas).filter(p => p.t >= r.t0 - 1e-6 && p.t <= r.t0 + 8 + 1e-6);
+  if (!ord.length) return [];
+  const sel = [{ ...ord[0], ahora: true }, ...ord.slice(1)];
+  if (sel.length <= 10) return sel;
+  const peso = (p, k) => p.evento ? 1e6 : (p.modo !== sel[k - 1].modo ? 1e5 : Math.abs((p.valor - sel[k - 1].valor + 540) % 360 - 180));
+  const resto = sel.slice(1).map((p, k) => ({ p, w: peso(p, k + 1) })).sort((a, b) => b.w - a.w).slice(0, 9).map(x => x.p);
+  return [sel[0], ...resto.sort((a, b) => a.t - b.t)];
 }
 function tablaOrdenes(r, filas, fin) {
   const dia = h => new Intl.DateTimeFormat(idioma, { weekday: "short", day: "2-digit", month: "2-digit" }).format(new Date(h * 3.6e6));
@@ -864,7 +883,7 @@ function tablaOrdenes(r, filas, fin) {
     if (d !== diaAnt) { html += `<tr class="dia"><td colspan="5">${d}</td></tr>`; diaAnt = d; }
     const nombre = r.velas[p.vela], nota = p.ahora ? t("ajustarYa") : p.evento;
     html += `<tr class="${p.evento ? "man" : ""}"><td class="h">${hora(p.t)}</td><td class="d">${fDesde(p.t - r.t0)}</td>
-      <td class="o">TWA ${fTwa(p.twa)}</td><td class="a">${p.twa > 0 ? t("estr") : t("bab")}</td>
+      <td class="o">${p.modo ? fOrden(p) : "TWA " + fTwa(p.twa)}</td><td class="a">${p.twa > 0 ? t("estr") : t("bab")}</td>
       <td class="v"><span class="guion" style="background:${COLOR_VELA[nombre] || "var(--tinta2)"}"></span>${esc(nombre)}${nota ? `<span class="nota-v">${nota}</span>` : ""}</td></tr>`;
   }
   if (fin) html += `<tr class="fin"><td class="h">${hora(fin.t)}</td><td class="d">${fDesde(fin.t - r.t0)}</td><td class="o">⚑</td><td></td><td>${t("llegada")}</td></tr>`;
