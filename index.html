@@ -588,6 +588,9 @@ const T = {
   errCoord: ["«{x}» no es una coordenada válida. Ejemplo: 43 37 53 N", "« {x} » n'est pas une coordonnée valide. Exemple : 43 37 53 N", "“{x}” is not a valid coordinate. Example: 43 37 53 N"],
   meteoCache: ["Meteo de la caché (menos de 3 h).", "Météo du cache (moins de 3 h).", "Cached weather (less than 3 h old)."],
   meteoBaja: ["Descargando la meteo GFS: {i}/{n} puntos", "Téléchargement météo GFS : {i}/{n} points", "Downloading GFS weather: {i}/{n} points"],
+  meteoLimite: ["Open-Meteo pide esperar (límite gratuito): reintento en {s} s", "Open-Meteo demande d'attendre (limite gratuite) : nouvel essai dans {s} s", "Open-Meteo asks to wait (free limit): retrying in {s} s"],
+  meteoVieja: ["No se pudo descargar: uso la última meteo guardada (puede ser antigua).", "Téléchargement impossible : j'utilise la dernière météo enregistrée (peut-être ancienne).", "Download failed: using the last saved weather (may be old)."],
+  meteoFallo: ["Open-Meteo no responde o has superado su límite gratuito (unas 5000 peticiones por hora). Espera 30–60 min y vuelve a intentarlo.", "Open-Meteo ne répond pas ou tu as dépassé sa limite gratuite (environ 5000 requêtes par heure). Attends 30–60 min et réessaie.", "Open-Meteo is not responding or you exceeded its free limit (about 5000 requests per hour). Wait 30–60 min and try again."],
   meteoEspera: ["Pausa para el límite gratuito de Open-Meteo… {s} s", "Pause pour la limite gratuite d'Open-Meteo… {s} s", "Pausing for Open-Meteo's free limit… {s} s"],
   meteoError: ["No se ha podido descargar la meteo ({e}). Comprueba la conexión o activa el viento de demostración.",
     "Impossible de télécharger la météo ({e}). Vérifie la connexion ou active le vent de démonstration.",
@@ -721,11 +724,24 @@ async function meteo(puntos, forzar) {
     const url = "https://api.open-meteo.com/v1/gfs?latitude=" + trozo.map(p => p[0].toFixed(2)).join(",") +
       "&longitude=" + trozo.map(p => p[1].toFixed(2)).join(",") +
       "&hourly=wind_speed_10m,wind_direction_10m&wind_speed_unit=kn&forecast_days=7&timeformat=unixtime&timezone=GMT";
-    const r = await fetch(url);
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    const j = await r.json();
+    let j = null;
+    for (let intento = 0; intento < 6 && !j; intento++) {
+      let r = null;
+      try { r = await fetch(url); } catch (e) { r = null; }
+      if (r && r.ok) { j = await r.json(); break; }
+      if (r && ![429, 500, 502, 503, 504].includes(r.status)) throw new Error("HTTP " + r.status);
+      // 429 = demasiadas peticiones: Open-Meteo pide esperar; reintento con esperas cada vez más largas
+      for (let s = 30 * (intento + 1); s > 0; s--) { estado(t("meteoLimite", { s })); await esperar(1000); }
+    }
+    if (!j) {
+      if (c && c.lats[0] <= latMin && c.lats.at(-1) >= latMax && c.lons[0] <= lonMin && c.lons.at(-1) >= lonMax) {
+        estado(t("meteoVieja"));
+        return { horas: c.horas, lats: c.lats, lons: c.lons, u: deB64(c.u), v: deB64(c.v) };
+      }
+      throw new Error(t("meteoFallo"));
+    }
     datos.push(...(Array.isArray(j) ? j : [j]));
-    if (i + 100 < pts.length) for (let s = 11; s > 0; s--) { estado(t("meteoEspera", { s })); await esperar(1000); }
+    if (i + 100 < pts.length) for (let s = 15; s > 0; s--) { estado(t("meteoEspera", { s })); await esperar(1000); }
   }
   const horas = datos[0].hourly.time.map(x => x / 3600), nt = horas.length, nla = lats.length, nlo = lons.length;
   const u = new Float32Array(nt * nla * nlo), v = new Float32Array(u.length);
