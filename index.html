@@ -148,6 +148,7 @@ ol.clave .detalle{font-size:14px;color:var(--tinta2)}
         <label><input type="radio" name="amura" value="0" checked><span data-t="nose"></span></label>
       </div>
     </div>
+    <label class="campo"><span data-t="energia"></span><input id="energia" type="number" min="0" max="100" inputmode="numeric"></label>
   </fieldset>
 
   <fieldset>
@@ -172,6 +173,11 @@ ol.clave .detalle{font-size:14px;color:var(--tinta2)}
       <label><input type="radio" name="paso" value="0.5"><span data-t="preciso"></span></label>
     </div>
     <label class="check"><input type="checkbox" id="foils"><span data-t="foils"></span></label>
+    <label class="check"><input type="checkbox" id="winch"><span data-t="winch"></span></label>
+    <div class="fila" style="margin-top:8px">
+      <label class="campo"><span data-t="puntosProg"></span><select id="puntos" class="campo"><option>2</option><option>5</option><option>9</option><option>15</option></select></label>
+      <label class="campo"><span data-t="horizonte"></span><select id="horizonte" class="campo"><option value="6">6 h</option><option value="12">12 h</option><option value="24">24 h</option><option value="48">48 h</option></select></label>
+    </div>
     <label class="check"><input type="checkbox" id="forzar"><span data-t="forzar"></span></label>
     <label class="check"><input type="checkbox" id="demo"><span data-t="demo"></span></label>
     <details>
@@ -324,11 +330,23 @@ function tramo(ctx, salida, meta, t0, vela0, amura0) {
     return [k - 1, (a - xs[k - 1]) / (xs[k] - xs[k - 1])];
   }));
   const fa = As.map(a => rampa(a, 60, 70) * (1 - rampa(a, 160, 170)));
-  const penal = (vAnt, vNew, aAnt, aNew, aAbs) => {
-    let p = (vAnt >= 0 && vAnt !== vNew) ? cfg.penVela : 0;
-    if (aAnt !== 0 && aAnt !== aNew) p += aAbs < 90 ? cfg.penVirada : cfg.penTrasluchada;
-    return p / 60;
+  // Reglas de la ayuda de Virtual Regatta (Class40): virada/trasluchada 3→5 min, vela 4→6 min (de 10 a 30 nudos),
+  // barco al 50 % durante la maniobra (70 % con Winchs Pro); energía: amura 10 %, vela 20 % × coef. de viento;
+  // tiempo × (2 − 1,5·E/100); recuperación 1 % cada 5 min (poco viento) a 15 min (30 nudos o más).
+  const base = (a, b, tws) => a + (b - a) * rampa(tws, 10, 30);
+  const coefT = e => 2 - 1.5 * Math.min(100, Math.max(0, e)) / 100;
+  const coefE = tws => tws <= 10 ? 1 + 0.02 * tws : tws <= 20 ? 1.2 + 0.03 * (tws - 10) : tws <= 30 ? 1.5 + 0.05 * (tws - 20) : 2;
+  const minPunto = tws => { const X = [0, 5, 10, 15, 20, 25, 30], Y = [5, 5.2, 7, 10, 13, 14.6, 15];
+    if (tws >= 30) return 15; let k = 1; while (X[k] < tws) k++; return Y[k - 1] + (Y[k] - Y[k - 1]) * (tws - X[k - 1]) / (X[k] - X[k - 1]); };
+  const perdida = cfg.winch ? 0.3 : 0.5;
+  // devuelve [horas perdidas equivalentes, energía tras la maniobra]
+  const penal = (vAnt, vNew, aAnt, aNew, tws, e) => {
+    let tmin = 0;
+    if (aAnt !== 0 && aAnt !== aNew) { tmin += base(3, 5, tws) * coefT(e); e -= 10 * coefE(tws); }
+    if (vAnt >= 0 && vAnt !== vNew) { tmin += base(4, 6, tws) * coefT(e); e -= 20 * coefE(tws); }
+    return [tmin / 60 * perdida, Math.max(0, e)];
   };
+  const recup = (e, tws) => Math.min(100, e + dt * 60 / minPunto(tws));
   const velMejor = (filas, twaAbs, tws) => {
     let best = -1, s = 0;
     for (let k = 0; k < nS; k++) {
@@ -341,8 +359,8 @@ function tramo(ctx, salida, meta, t0, vela0, amura0) {
   const cercaMeta = (la, lo) => dist(la, lo, meta[0], meta[1]) < 8;
   const la0 = salida[0], lo0 = salida[1];
 
-  let P = { lat: [salida[0]], lon: [salida[1]], vela: [vela0], amura: [amura0] };
-  const hist = [{ lat: P.lat, lon: P.lon, padre: [-1] }];
+  let P = { lat: [salida[0]], lon: [salida[1]], vela: [vela0], amura: [amura0], en: [cfg.energia ?? 100], dm: [99] };
+  const hist = [{ lat: P.lat, lon: P.lon, padre: [-1], en: P.en }];
   const isos = [];
   let t = t0, paso = 0;
   const d0 = dist(salida[0], salida[1], meta[0], meta[1]);
@@ -363,7 +381,7 @@ function tramo(ctx, salida, meta, t0, vela0, amura0) {
       const cm = rumbo(P.lat[i], P.lon[i], meta[0], meta[1]);
       const twaM = n180(twd - cm), aM = Math.abs(twaM);
       const [v, s] = velMejor(filas[i], aM, tws);
-      const pen = penal(P.vela[i], s, P.amura[i], Math.sign(twaM), aM);
+      const [pen] = penal(P.vela[i], s, P.amura[i], Math.sign(twaM), tws, P.en[i]);
       if (v * Math.max(dt - pen, 0) < dm && dm > 1.5 * cfg.sectorMn) continue;
       const [mla, mlo] = avanzar(P.lat[i], P.lon[i], cm, dm / 2);
       if (!cercaMeta(mla, mlo) && enTierra(mla, mlo)) continue;
@@ -372,14 +390,15 @@ function tramo(ctx, salida, meta, t0, vela0, amura0) {
     }
     if (mejorI >= 0) {
       hist.push({ lat: [meta[0]], lon: [meta[1]], padre: [mejorI], cap: [mejorDatos.cap], twa: [mejorDatos.twa],
-        vela: [mejorDatos.vela], v: [mejorDatos.v], tws: [mejorDatos.tws], twd: [mejorDatos.twd] });
+        vela: [mejorDatos.vela], v: [mejorDatos.v], tws: [mejorDatos.tws], twd: [mejorDatos.twd], en: [0] });
       return { pasos: reconstruir(hist, 0, t0, dt, mejorT), isos, llegado: true };
     }
     // 2) expandir (cálculos rápidos: avance en plano local, sin trigonometría por candidato)
     const cap0 = N * nA * 2;
     const C = { lat: new Float64Array(cap0), lon: new Float64Array(cap0), padre: new Int32Array(cap0),
       cap: new Float32Array(cap0), twa: new Float32Array(cap0), vela: new Int8Array(cap0), v: new Float32Array(cap0),
-      tws: new Float32Array(cap0), twd: new Float32Array(cap0), b: new Float64Array(cap0), d: new Float64Array(cap0) };
+      tws: new Float32Array(cap0), twd: new Float32Array(cap0), b: new Float64Array(cap0), d: new Float64Array(cap0),
+      en: new Float32Array(cap0), dm: new Float32Array(cap0) };
     let M = 0;
     for (let i = 0; i < N; i++) {
       const [tws, twd] = vientos[i];
@@ -400,7 +419,9 @@ function tramo(ctx, salida, meta, t0, vela0, amura0) {
         const v = velS[k];
         if (v < 0.05) continue;
         for (let S = 1; S >= -1; S -= 2) {
-          const pen = penal(P.vela[i], selS[k], P.amura[i], S, As[k]);
+          const cambia = P.amura[i] !== 0 && P.amura[i] !== S;
+          if (cambia && P.dm[i] < (cfg.bordoMin ?? 2)) continue;   // no volver a virar antes de 2 h (zigzags del cálculo)
+          const [pen, eTras] = penal(P.vela[i], selS[k], P.amura[i], S, tws, P.en[i]);
           const d = v * Math.max(dt - pen, 0);
           if (d <= 0.01) continue;
           // cap = twd - S*A
@@ -410,7 +431,7 @@ function tramo(ctx, salida, meta, t0, vela0, amura0) {
           const x = (nlo - lo0) * Math.cos((nla + la0) / 2 * D2R), y = nla - la0;
           C.lat[M] = nla; C.lon[M] = nlo; C.padre[M] = i;
           C.cap[M] = ((twd - S * As[k]) % 360 + 360) % 360; C.twa[M] = S * As[k];
-          C.vela[M] = selS[k]; C.v[M] = v; C.tws[M] = tws; C.twd[M] = twd;
+          C.vela[M] = selS[k]; C.v[M] = v; C.tws[M] = tws; C.twd[M] = twd; C.en[M] = recup(eTras, tws); C.dm[M] = cambia ? 0 : P.dm[i] + dt;
           C.b[M] = Math.atan2(x, y); C.d[M] = 60 * Math.hypot(x, y); M++;
         }
       }
@@ -432,9 +453,9 @@ function tramo(ctx, salida, meta, t0, vela0, amura0) {
       C.d[m] + dist(C.lat[m], C.lon[m], meta[0], meta[1]) <= cfg.elipse * d0 + 30);
     if (!keep.length) break;
     const H = {};
-    for (const key of ["lat", "lon", "padre", "cap", "twa", "vela", "v", "tws", "twd"]) H[key] = keep.map(m => C[key][m]);
+    for (const key of ["lat", "lon", "padre", "cap", "twa", "vela", "v", "tws", "twd", "en", "dm"]) H[key] = keep.map(m => C[key][m]);
     hist.push(H);
-    P = { lat: H.lat, lon: H.lon, vela: H.vela, amura: H.twa.map(Math.sign) };
+    P = { lat: H.lat, lon: H.lon, vela: H.vela, amura: H.twa.map(Math.sign), en: H.en, dm: H.dm };
     t += dt; paso++;
     if (paso % Math.max(1, Math.round(6 / dt)) === 0) {
       const ord = keep.map((m, i) => [C.b[m], i]).sort((x, y) => x[0] - y[0]);
@@ -458,15 +479,15 @@ function reconstruir(hist, iFinal, t0, dt, tLlegada) {
   const cadena = [];
   for (let k = ultimo; k > 0; k--) {
     const h = hist[k];
-    cadena.push({ lat: h.lat[idx], lon: h.lon[idx], cap: h.cap[idx], twa: h.twa[idx], vela: h.vela[idx], v: h.v[idx], tws: h.tws[idx], twd: h.twd[idx] });
+    cadena.push({ lat: h.lat[idx], lon: h.lon[idx], cap: h.cap[idx], twa: h.twa[idx], vela: h.vela[idx], v: h.v[idx], tws: h.tws[idx], twd: h.twd[idx], en: h.en[idx] });
     idx = h.padre[idx];
   }
   cadena.reverse();
   const pasos = [];
-  let la = hist[0].lat[0], lo = hist[0].lon[0];
+  let la = hist[0].lat[0], lo = hist[0].lon[0], en = hist[0].en[0];
   cadena.forEach((m, k) => {
-    pasos.push({ t: t0 + k * dt, lat: la, lon: lo, cap: m.cap, twa: m.twa, vela: m.vela, v: m.v, tws: m.tws, twd: m.twd });
-    la = m.lat; lo = m.lon;
+    pasos.push({ t: t0 + k * dt, lat: la, lon: lo, cap: m.cap, twa: m.twa, vela: m.vela, v: m.v, tws: m.tws, twd: m.twd, en });
+    la = m.lat; lo = m.lon; en = m.en;
   });
   pasos.push({ t: tLlegada !== null ? tLlegada : t0 + cadena.length * dt, lat: la, lon: lo, fin: true });
   return pasos;
@@ -586,7 +607,11 @@ const T = {
   colHora: ["hora", "heure", "time"], colDesde: ["desde", "depuis", "elapsed"], colOrden: ["orden", "ordre", "order"],
   colAmura: ["amura", "amure", "tack"], colVela: ["vela", "voile", "sail"],
   bab: ["bab.", "bâb.", "port"], estr: ["estr.", "trib.", "stbd"], ajustarYa: ["ajustar ya", "à régler maintenant", "set now"],
-  clave: ["Próximas 8 horas", "Prochaines 8 heures", "Next 8 hours"],
+  clave: ["Programa: {n} órdenes en {h} h", "Programme : {n} ordres sur {h} h", "Program: {n} orders over {h} h"],
+  energia: ["Energía actual (%)", "Énergie actuelle (%)", "Current energy (%)"],
+  winch: ["Tengo los Winchs Pro", "J'ai les Winchs Pro", "I have the Winchs Pro"],
+  puntosProg: ["Puntos a programar", "Points à programmer", "Points to program"],
+  horizonte: ["Durante", "Sur", "Over"],
   ahora: ["Ahora", "Maintenant", "Now"], enX: ["en {x}", "dans {x}", "in {x}"],
   mantener: ["TWA {a}", "TWA {a}", "TWA {a}"], cambiaTwa: ["TWA {a} → {b}", "TWA {a} → {b}", "TWA {a} → {b}"],
   rolaCap: ["Rumbo → {c}° (el viento rola)", "Cap → {c}° (le vent tourne)", "Heading → {c}° (wind shift)"],
@@ -652,14 +677,27 @@ async function tierra() {
 }
 
 /* ---------------- meteo (Open-Meteo, modelo GFS) ---------------- */
+// caché compacta: décimas de nudo en enteros de 16 bits, en base64 (cabe en el almacenamiento del navegador)
+function aB64(f) {
+  const i16 = Int16Array.from(f, x => Math.max(-32767, Math.min(32767, Math.round(x * 10))));
+  const b = new Uint8Array(i16.buffer); let s = "";
+  for (let k = 0; k < b.length; k += 32768) s += String.fromCharCode.apply(null, b.subarray(k, k + 32768));
+  return btoa(s);
+}
+function deB64(t) {
+  if (Array.isArray(t)) return Float32Array.from(t);
+  const s = atob(t), b = new Uint8Array(s.length);
+  for (let k = 0; k < s.length; k++) b[k] = s.charCodeAt(k);
+  return Float32Array.from(new Int16Array(b.buffer), x => x / 10);
+}
 async function meteo(puntos, forzar) {
-  const la = puntos.map(p => p[0]), lo = puntos.map(p => p[1]), res = 2;
-  const latMin = Math.max(-70, Math.floor(Math.min(...la) - 8)), latMax = Math.min(75, Math.ceil(Math.max(...la) + 8));
-  const lonMin = Math.floor(Math.min(...lo) - 10), lonMax = Math.ceil(Math.max(...lo) + 10);
+  const la = puntos.map(p => p[0]), lo = puntos.map(p => p[1]), res = 1;
+  const latMin = Math.max(-70, Math.floor(Math.min(...la) - 5)), latMax = Math.min(75, Math.ceil(Math.max(...la) + 5));
+  const lonMin = Math.floor(Math.min(...lo) - 6), lonMax = Math.ceil(Math.max(...lo) + 6);
   const c = leer("vr_meteo", null);
   if (c && !forzar && Date.now() - c.descarga < 3 * 3.6e6 && c.lats[0] <= latMin && c.lats.at(-1) >= latMax && c.lons[0] <= lonMin && c.lons.at(-1) >= lonMax) {
     estado(t("meteoCache"));
-    return { horas: c.horas, lats: c.lats, lons: c.lons, u: Float32Array.from(c.u), v: Float32Array.from(c.v) };
+    return { horas: c.horas, lats: c.lats, lons: c.lons, u: deB64(c.u), v: deB64(c.v) };
   }
   const lats = [], lons = [];
   for (let a = latMin; a <= latMax + 1e-6; a += res) lats.push(a);
@@ -687,7 +725,7 @@ async function meteo(puntos, forzar) {
       u[q] = -s * Math.sin(dir); v[q] = -s * Math.cos(dir);
     });
   });
-  guardar("vr_meteo", { descarga: Date.now(), horas, lats, lons, u: Array.from(u, x => Math.round(x * 10) / 10), v: Array.from(v, x => Math.round(x * 10) / 10) });
+  guardar("vr_meteo", { descarga: Date.now(), horas, lats, lons, u: aB64(u), v: aB64(v) });
   return { horas, lats, lons, u, v };
 }
 
@@ -709,17 +747,20 @@ function guardarAjustes() {
   a.amura = document.querySelector("input[name=amura]:checked").value;
   a.paso = document.querySelector("input[name=paso]:checked").value;
   a.foils = $("foils").checked; a.demo = $("demo").checked;
+  a.winch = $("winch").checked; a.energia = $("energia").value; a.puntos = $("puntos").value; a.horizonte = $("horizonte").value;
   guardar("vr_ajustes", a);
 }
 function cargarAjustes() {
   const nav = (navigator.language || "es").slice(0, 2);
   const a = Object.assign({ idioma: ["es", "fr", "en"].includes(nav) ? nav : "es", lat: "43 37 53 N", lon: "032 13 34 W",
-    latLl: "16 12 N", lonLl: "061 32 W", latVia: "", lonVia: "", amura: "0", paso: "1", foils: false, demo: false }, leer("vr_ajustes", {}));
+    latLl: "16 12 N", lonLl: "061 32 W", latVia: "", lonVia: "", amura: "0", paso: "1", foils: false, demo: false,
+    winch: false, energia: "100", puntos: "9", horizonte: "24" }, leer("vr_ajustes", {}));
   idioma = a.idioma; $("idioma").value = idioma;
   CAMPOS.forEach(c => $(c).value = a[c] || "");
   document.querySelector(`input[name=amura][value="${a.amura}"]`).checked = true;
   document.querySelector(`input[name=paso][value="${a.paso}"]`).checked = true;
   $("foils").checked = a.foils; $("demo").checked = a.demo;
+  $("winch").checked = a.winch; $("energia").value = a.energia; $("puntos").value = a.puntos; $("horizonte").value = a.horizonte;
   if (a.latVia || a.lonVia) $("detVia").open = true;
 }
 
@@ -745,7 +786,8 @@ async function preparar() {
   const [w, ti] = await Promise.all([demo ? Promise.resolve(null) : meteo(puntos, $("forzar").checked), tierra()]);
   $("forzar").checked = false;
   const cfg = { paso: Number(document.querySelector("input[name=paso]:checked").value), maxHoras: 360, pasoTwa: 3, twaMin: 33,
-    sectorMn: 6, elipse: 1.6, penVela: 3, penVirada: 3, penTrasluchada: 3, foils: $("foils").checked, demo };
+    sectorMn: 6, elipse: 1.6, foils: $("foils").checked, winch: $("winch").checked, demo,
+    energia: Math.max(0, Math.min(100, Number($("energia").value) || 100)) };
   return { puntos, w, ti, cfg, t0, amura0: Number(document.querySelector("input[name=amura]:checked").value) };
 }
 function ejecutar(prep, pol, cfg, alProgreso) {
@@ -864,14 +906,55 @@ function cambios(filas) { return ordenes(filas); }
 const COLOR_VELA = { "Jib": "#E3912B", "Spi": "#1A9B72", "Code 0": "#6FA0DC", "Spi lourd": "#E08A98", "Trinquette": "#5FA86E", "Spi léger": "#D9907A", "Génois léger": "#C77FB4" };
 const fTwa = a => `${a > 0 ? "+" : "−"}${Math.abs(Math.round(a))}°`;
 const fDesde = h => { const m = Math.max(0, Math.round(h * 60)); return `+${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}`; };
+/* Programa óptimo: como mucho N órdenes (TWA o CAP fijo) que sigan la ruta lo mejor posible durante H horas.
+   Programación dinámica que minimiza el error de TWA entre la ruta y lo que haría el barco con esas órdenes.
+   Las maniobras y los cambios de vela siempre empiezan una orden nueva. */
 function momentosClave(r, filas) {
-  const ord = ordenes(filas).filter(p => p.t >= r.t0 - 1e-6 && p.t <= r.t0 + 8 + 1e-6);
-  if (!ord.length) return [];
-  const sel = [{ ...ord[0], ahora: true }, ...ord.slice(1)];
-  if (sel.length <= 10) return sel;
-  const peso = (p, k) => p.evento ? 1e6 : (p.modo !== sel[k - 1].modo ? 1e5 : Math.abs((p.valor - sel[k - 1].valor + 540) % 360 - 180));
-  const resto = sel.slice(1).map((p, k) => ({ p, w: peso(p, k + 1) })).sort((a, b) => b.w - a.w).slice(0, 9).map(x => x.p);
-  return [sel[0], ...resto.sort((a, b) => a.t - b.t)];
+  const D2R = Math.PI / 180, H = Number($("horizonte").value) || 24;
+  const fil = filas.filter(p => p.t >= r.t0 - 1e-6 && p.t <= r.t0 + H + 1e-6), n = fil.length;
+  if (!n) return [];
+  const forz = fil.map((p, k) => k === 0 || !!p.evento);
+  const N = Math.max(Number($("puntos").value) || 9, forz.filter(Boolean).length);
+  const n180 = a => ((a % 360) + 540) % 360 - 180;
+  const coste = Array.from({ length: n }, () => new Float64Array(n).fill(Infinity)), modo = {};
+  for (let i = 0; i < n; i++) {
+    let sx = 0, sy = 0, st = 0;
+    for (let j = i; j < n; j++) {
+      if (j > i && forz[j]) break;
+      st += fil[j].twa; sx += Math.cos(fil[j].cap * D2R); sy += Math.sin(fil[j].cap * D2R);
+      const m = st / (j - i + 1);
+      let c = 0; for (let k = i; k <= j; k++) c += (fil[k].twa - m) ** 2;
+      let info = ["TWA", Math.round(m)];
+      if (Math.abs(fil[i].twa) >= 40) {
+        const h = (Math.atan2(sy, sx) / D2R + 360) % 360;
+        let cc = 0, ok = true;
+        for (let k = i; k <= j && ok; k++) {
+          const pr = n180(fil[k].twd - h);
+          if (Math.abs(pr) < 40 || Math.sign(pr) !== Math.sign(fil[i].twa)) ok = false; else cc += (fil[k].twa - pr) ** 2;
+        }
+        if (ok && cc < c - 1e-9) { c = cc; info = ["CAP", Math.round(h) % 360]; }
+      }
+      coste[i][j] = c + 40; modo[i + "," + j] = info;   // +40: una orden solo se añade si mejora de verdad
+    }
+  }
+  const mejor = Array.from({ length: N + 1 }, () => new Float64Array(n).fill(Infinity));
+  const prev = Array.from({ length: N + 1 }, () => new Int32Array(n).fill(-1));
+  for (let j = 0; j < n; j++) mejor[1][j] = coste[0][j];
+  for (let k = 2; k <= N; k++) for (let j = 0; j < n; j++) for (let i = 1; i <= j; i++) {
+    const c = mejor[k - 1][i - 1] + coste[i][j];
+    if (c < mejor[k][j]) { mejor[k][j] = c; prev[k][j] = i; }
+  }
+  let k = 1; for (let q = 2; q <= N; q++) if (mejor[q][n - 1] < mejor[k][n - 1]) k = q;
+  const cortes = []; let j = n - 1;
+  while (k >= 1) { const i = k > 1 ? prev[k][j] : 0; cortes.unshift([i, j]); j = i - 1; k--; }
+  const plan = [];
+  for (const [i, jj] of cortes) {
+    const [m, v] = modo[i + "," + jj], o = { ...fil[i], modo: m, valor: v }, a = plan.at(-1);
+    if (a && !o.evento && o.modo === a.modo && (m === "CAP" ? difAng(v, a.valor) : Math.abs(v - a.valor)) < 2) continue;
+    plan.push(o);
+  }
+  plan[0].ahora = true;
+  return plan;
 }
 function tablaOrdenes(r, filas, fin) {
   const dia = h => new Intl.DateTimeFormat(idioma, { weekday: "short", day: "2-digit", month: "2-digit" }).format(new Date(h * 3.6e6));
@@ -891,6 +974,7 @@ function tablaOrdenes(r, filas, fin) {
 }
 function pintarClave(r, filas) {
   const m = momentosClave(r, filas);
+  document.querySelector("[data-t=clave]").textContent = t("clave", { n: m.length, h: $("horizonte").value });
   $("clave").innerHTML = tablaOrdenes(r, m) + (m.length <= 1 ? `<p class="vacio">${t("sinCambios")}</p>` : "");
 }
 function pintarResultado(r) {
@@ -932,6 +1016,7 @@ aplicarIdioma();
 $("idioma").addEventListener("change", e => { idioma = e.target.value; guardarAjustes(); aplicarIdioma(); });
 $("calcular").addEventListener("click", calcular);
 $("comparar").addEventListener("click", comparar);
+["puntos", "horizonte"].forEach(id => $(id).addEventListener("change", () => { guardarAjustes(); if (ultimo) pintarResultado(ultimo); }));
 document.querySelectorAll("input[name=vista]").forEach(x => x.addEventListener("change", () => ultimo && pintarResultado(ultimo)));
 ["vela", "foils", "demo", ...CAMPOS].forEach(c => $(c).addEventListener("change", guardarAjustes));
 document.querySelectorAll("input[name=amura],input[name=paso]").forEach(x => x.addEventListener("change", guardarAjustes));
